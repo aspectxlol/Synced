@@ -1,0 +1,12 @@
+# Synced Plugin Configuration
+# Default values for sync toggles (can be overridden per-team via the GUI)
+
+defaults:
+  inventory-sync: true
+  health-sync: true
+  hunger-sync: true
+  xp-sync: true
+  potion-effects-sync: true
+  ender-chest-sync: true
+  position-sync: false
+

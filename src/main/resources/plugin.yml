@@ -1,0 +1,11 @@
+name: Synced
+version: '1.0-SNAPSHOT'
+main: com.aspectxlol.Synced
+api-version: '1.21'
+description: Team-based player data synchronization plugin
+
+commands:
+  synced:
+    description: Main Synced command
+    usage: /synced <start|invite|join|leave|disband|info>
+    aliases: [sync]
