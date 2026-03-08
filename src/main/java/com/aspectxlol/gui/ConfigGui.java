@@ -16,14 +16,25 @@ public class ConfigGui {
 
     public static final String GUI_TITLE = "Synced - Configuration";
 
-    // Slot layout in a 54-slot chest (6 rows):
-    // Row 1: label items (icons)
-    // Row 2: toggle items (dyes)
-    // We use two rows per toggle pair, one slot each, in a 9-wide chest.
-    // Layout: slot 0-6 = icon items, slot 9-15 = toggle dyes
+    /*
+     * 54-slot chest layout (6 rows × 9 columns), slots 0-53:
+     *
+     *  Row 0  [ B  B  B  B  B  B  B  B  B ]   ← full border row
+     *  Row 1  [ B  I0 B  I1 B  I2 B  I3 B ]   ← icons  (top group)
+     *  Row 2  [ B  T0 B  T1 B  T2 B  T3 B ]   ← toggles (top group)
+     *  Row 3  [ B  B  B  B  B  B  B  B  B ]   ← full border separator
+     *  Row 4  [ B  I4 B  I5 B  I6 B  B  B ]   ← icons  (bottom group)
+     *  Row 5  [ B  T4 B  T5 B  T6 B  B  B ]   ← toggles (bottom group)
+     *
+     *  B = gray stained glass pane (filler)
+     *  I = icon item (compass, red dye, etc.)
+     *  T = toggle dye (green = on, red = off)
+     */
 
-    public static final int[] ICON_SLOTS  = {10, 12, 14, 16, 20, 22, 24};
-    public static final int[] TOGGLE_SLOTS = {11, 13, 15, 17, 21, 23, 25};
+    // Icon slots: row 1 cols 1,3,5,7  then row 4 cols 1,3,5
+    public static final int[] ICON_SLOTS   = { 10, 12, 14, 16,   37, 39, 41 };
+    // Toggle slots directly below each icon
+    public static final int[] TOGGLE_SLOTS = { 19, 21, 23, 25,   46, 48, 50 };
 
     public static final String[] OPTION_NAMES = {
         "Inventory Sync",
@@ -47,7 +58,8 @@ public class ConfigGui {
 
     public static Inventory build(SyncSettings settings) {
         Inventory inv = Bukkit.createInventory(null, 54,
-                Component.text(GUI_TITLE, NamedTextColor.DARK_AQUA).decoration(TextDecoration.ITALIC, false));
+                Component.text(GUI_TITLE, NamedTextColor.DARK_AQUA)
+                         .decoration(TextDecoration.ITALIC, false));
 
         boolean[] values = getValues(settings);
 
@@ -60,11 +72,11 @@ public class ConfigGui {
             icon.setItemMeta(iconMeta);
             inv.setItem(ICON_SLOTS[i], icon);
 
-            // Toggle dye
+            // Toggle dye directly below the icon
             inv.setItem(TOGGLE_SLOTS[i], buildToggleDye(i, values[i]));
         }
 
-        // Fill empty slots with gray glass panes
+        // Fill all remaining slots with silent gray glass panes
         ItemStack filler = new ItemStack(Material.GRAY_STAINED_GLASS_PANE);
         ItemMeta fillerMeta = filler.getItemMeta();
         fillerMeta.displayName(Component.empty());
@@ -88,7 +100,7 @@ public class ConfigGui {
         ).decoration(TextDecoration.ITALIC, false));
         meta.lore(List.of(
                 Component.text("Click to toggle " + OPTION_NAMES[optionIndex], NamedTextColor.GRAY)
-                        .decoration(TextDecoration.ITALIC, false)
+                         .decoration(TextDecoration.ITALIC, false)
         ));
         dye.setItemMeta(meta);
         return dye;

@@ -26,7 +26,7 @@ public final class Synced extends JavaPlugin {
 
         // Register listeners
         getServer().getPluginManager().registerEvents(new GuiClickListener(teamManager), this);
-        getServer().getPluginManager().registerEvents(new SyncListener(teamManager, syncManager), this);
+        getServer().getPluginManager().registerEvents(new SyncListener(this, teamManager, syncManager), this);
 
         // Register command
         SyncedCommand syncedCommand = new SyncedCommand(this, teamManager);

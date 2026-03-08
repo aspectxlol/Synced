@@ -3,64 +3,91 @@ package com.aspectxlol.manager;
 import com.aspectxlol.model.SyncSettings;
 import com.aspectxlol.model.SyncTeam;
 import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 
 import java.util.*;
 
 public class SyncManager {
 
-    private final Set<UUID> currentlySyncing = Collections.synchronizedSet(new HashSet<>());
+    /**
+     * Static so all listeners share the exact same guard set.
+     * Synchronized to be thread-safe (Bukkit events are on the main thread,
+     * but better safe than sorry).
+     */
+    private static final Set<UUID> currentlySyncing =
+            Collections.synchronizedSet(new HashSet<>());
 
-    public Set<UUID> getCurrentlySyncing() {
+    /**
+     * Players who are currently dead and must NOT be health-synced.
+     */
+    private static final Set<UUID> deadPlayers =
+            Collections.synchronizedSet(new HashSet<>());
+
+    // ─── Guard helpers ──────────────────────────────────────────────────────────
+
+    public static Set<UUID> getCurrentlySyncing() {
         return currentlySyncing;
     }
 
+    public static Set<UUID> getDeadPlayers() {
+        return deadPlayers;
+    }
+
     /**
-     * Syncs the source player's data to all other online team members.
+     * Locks the source player AND all online team members into currentlySyncing,
+     * runs the action, then unlocks everyone.
      */
-    public void syncFromPlayer(Player source, SyncTeam team) {
-        if (currentlySyncing.contains(source.getUniqueId())) return;
-
-        SyncSettings settings = team.getSettings();
-
+    public static void withSyncLock(UUID source, SyncTeam team, Runnable action) {
+        Set<UUID> locked = new HashSet<>();
+        locked.add(source);
         for (UUID memberId : team.getMembers()) {
-            if (memberId.equals(source.getUniqueId())) continue;
-            Player target = Bukkit.getPlayer(memberId);
-            if (target == null || !target.isOnline()) continue;
-            if (currentlySyncing.contains(target.getUniqueId())) continue;
-
-            currentlySyncing.add(target.getUniqueId());
-            try {
-                applySync(source, target, settings);
-            } finally {
-                currentlySyncing.remove(target.getUniqueId());
+            if (!memberId.equals(source)) {
+                Player p = Bukkit.getPlayer(memberId);
+                if (p != null && p.isOnline()) locked.add(memberId);
             }
         }
+        currentlySyncing.addAll(locked);
+        try {
+            action.run();
+        } finally {
+            currentlySyncing.removeAll(locked);
+        }
     }
 
+    // ─── Full catch-up sync (used on late join) ─────────────────────────────────
+
     /**
-     * Syncs a specific aspect from source to target.
+     * Pushes all enabled sync types from {@code source} to {@code target} only.
+     * Used for late-join catch-up: source is the team leader (or any online member).
      */
-    private void applySync(Player source, Player target, SyncSettings settings) {
-        if (settings.isInventorySync()) {
-            syncInventory(source, target);
+    public void syncAll(Player source, Player target, SyncSettings settings) {
+        UUID srcId = source.getUniqueId();
+        UUID tgtId = target.getUniqueId();
+        currentlySyncing.add(srcId);
+        currentlySyncing.add(tgtId);
+        try {
+            if (settings.isInventorySync())     syncInventory(source, target);
+            if (settings.isHealthSync()
+                    && !deadPlayers.contains(srcId)) syncHealth(source, target);
+            if (settings.isHungerSync())        syncHunger(source, target);
+            if (settings.isXpSync())            syncXp(source, target);
+            if (settings.isPotionEffectsSync()) syncPotionEffects(source, target);
+            if (settings.isEnderChestSync())    syncEnderChest(source, target);
+            // Position sync on join is intentionally skipped to avoid jarring TP
+        } finally {
+            currentlySyncing.remove(srcId);
+            currentlySyncing.remove(tgtId);
         }
-        if (settings.isHealthSync()) {
-            syncHealth(source, target);
-        }
-        if (settings.isHungerSync()) {
-            syncHunger(source, target);
-        }
-        if (settings.isXpSync()) {
-            syncXp(source, target);
-        }
-        if (settings.isPotionEffectsSync()) {
-            syncPotionEffects(source, target);
-        }
-        // Ender chest and position sync are handled separately via events
     }
+
+    // ─── Per-type sync methods ──────────────────────────────────────────────────
 
     public void syncInventory(Player source, Player target) {
         ItemStack[] contents = source.getInventory().getContents().clone();
@@ -73,8 +100,21 @@ public class SyncManager {
     }
 
     public void syncHealth(Player source, Player target) {
-        target.setHealth(Math.min(source.getHealth(), target.getAttribute(
-                org.bukkit.attribute.Attribute.MAX_HEALTH).getValue()));
+        double maxHealth = getMaxHealth(target);
+        target.setHealth(Math.min(source.getHealth(), maxHealth));
+    }
+
+    // ─── Internal helpers ───────────────────────────────────────────────────────
+
+    /**
+     * Looks up MAX_HEALTH via the Paper 1.21 registry-based Attribute API.
+     * Avoids the removed Attribute.MAX_HEALTH enum constant.
+     */
+    public static double getMaxHealth(Player player) {
+        Attribute maxHealthAttr = Registry.ATTRIBUTE.get(NamespacedKey.minecraft("max_health"));
+        if (maxHealthAttr == null) return 20.0; // safe fallback
+        AttributeInstance inst = player.getAttribute(maxHealthAttr);
+        return inst != null ? inst.getValue() : 20.0;
     }
 
     public void syncHunger(Player source, Player target) {
@@ -89,13 +129,24 @@ public class SyncManager {
         target.setTotalExperience(source.getTotalExperience());
     }
 
+    /**
+     * Smart potion sync: only removes effects the source does NOT have,
+     * then adds/updates effects the source does have.
+     * This prevents flickering from a blind clearActivePotionEffects().
+     */
     public void syncPotionEffects(Player source, Player target) {
-        // Remove all current effects from target
+        Collection<PotionEffect> sourceEffects = source.getActivePotionEffects();
+        Set<PotionEffectType> sourceTypes = new HashSet<>();
+        for (PotionEffect e : sourceEffects) sourceTypes.add(e.getType());
+
+        // Remove only effects the target has that the source does NOT have
         for (PotionEffect effect : new ArrayList<>(target.getActivePotionEffects())) {
-            target.removePotionEffect(effect.getType());
+            if (!sourceTypes.contains(effect.getType())) {
+                target.removePotionEffect(effect.getType());
+            }
         }
-        // Apply source's effects
-        for (PotionEffect effect : source.getActivePotionEffects()) {
+        // Apply / update source's effects on the target
+        for (PotionEffect effect : sourceEffects) {
             target.addPotionEffect(effect);
         }
     }
@@ -113,4 +164,3 @@ public class SyncManager {
         target.teleport(source.getLocation());
     }
 }
-

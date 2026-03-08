@@ -113,6 +113,30 @@ public class TeamManager {
         return playerTeam.containsKey(playerUUID);
     }
 
+    /**
+     * If the quitting player is team leader, promotes the next online member.
+     * If no other member is online the original leaderUUID is preserved so they
+     * reclaim leadership automatically when they reconnect (see PlayerJoinEvent).
+     * Returns the newly promoted player, or null if no promotion happened.
+     */
+    public org.bukkit.entity.Player promoteNextOnlineLeader(UUID quittingPlayerUUID) {
+        SyncTeam team = getTeamOf(quittingPlayerUUID);
+        if (team == null) return null;
+        if (!team.getLeaderUUID().equals(quittingPlayerUUID)) return null;
+
+        for (UUID memberId : team.getMembers()) {
+            if (memberId.equals(quittingPlayerUUID)) continue;
+            org.bukkit.entity.Player candidate = org.bukkit.Bukkit.getPlayer(memberId);
+            if (candidate != null && candidate.isOnline()) {
+                team.setLeaderUUID(memberId);
+                saveTeams();
+                return candidate;
+            }
+        }
+        // No online member found — keep original leader UUID, don't touch it
+        return null;
+    }
+
     public Collection<SyncTeam> getAllTeams() {
         return Collections.unmodifiableCollection(teams.values());
     }
