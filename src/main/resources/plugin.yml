@@ -7,5 +7,5 @@ description: Team-based player data synchronization plugin
 commands:
   synced:
     description: Main Synced command
-    usage: /synced <start|invite|join|leave|disband|info>
+    usage: /sync <join|start|info|kick|leave|disband>
     aliases: [sync]

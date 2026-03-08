@@ -9,6 +9,7 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 
@@ -29,6 +30,13 @@ public class SyncManager {
      */
     private static final Set<UUID> deadPlayers =
             Collections.synchronizedSet(new HashSet<>());
+
+    /**
+     * Fallback max-health value used when the Attribute registry lookup returns null.
+     * Vanilla Minecraft default is 20.0 (10 hearts).
+     */
+    private static final double DEFAULT_MAX_HEALTH = 20.0;
+
 
     // ─── Guard helpers ──────────────────────────────────────────────────────────
 
@@ -90,13 +98,36 @@ public class SyncManager {
     // ─── Per-type sync methods ──────────────────────────────────────────────────
 
     public void syncInventory(Player source, Player target) {
-        ItemStack[] contents = source.getInventory().getContents().clone();
-        ItemStack[] copied = new ItemStack[contents.length];
-        for (int i = 0; i < contents.length; i++) {
-            copied[i] = contents[i] != null ? contents[i].clone() : null;
-        }
-        target.getInventory().setContents(copied);
+        PlayerInventory src = source.getInventory();
+        PlayerInventory dst = target.getInventory();
+
+        // ── Main storage (slots 0-35: hotbar + main grid) ──────────────────────
+        dst.setContents(deepCopy(src.getContents()));
+
+        // ── Armour (helmet, chestplate, leggings, boots) ───────────────────────
+        dst.setHelmet(     clone(src.getHelmet()));
+        dst.setChestplate( clone(src.getChestplate()));
+        dst.setLeggings(   clone(src.getLeggings()));
+        dst.setBoots(      clone(src.getBoots()));
+
+        // ── Off-hand ───────────────────────────────────────────────────────────
+        dst.setItemInOffHand(clone(src.getItemInOffHand()));
+
         target.updateInventory();
+    }
+
+    // Deep-copies an array of ItemStacks, preserving nulls and all NBT data.
+    private static ItemStack[] deepCopy(ItemStack[] original) {
+        ItemStack[] copy = new ItemStack[original.length];
+        for (int i = 0; i < original.length; i++) {
+            copy[i] = clone(original[i]);
+        }
+        return copy;
+    }
+
+    // Null-safe single-item clone.
+    private static ItemStack clone(ItemStack item) {
+        return item != null ? item.clone() : null;
     }
 
     public void syncHealth(Player source, Player target) {
@@ -112,9 +143,9 @@ public class SyncManager {
      */
     public static double getMaxHealth(Player player) {
         Attribute maxHealthAttr = Registry.ATTRIBUTE.get(NamespacedKey.minecraft("max_health"));
-        if (maxHealthAttr == null) return 20.0; // safe fallback
+        if (maxHealthAttr == null) return DEFAULT_MAX_HEALTH;
         AttributeInstance inst = player.getAttribute(maxHealthAttr);
-        return inst != null ? inst.getValue() : 20.0;
+        return inst != null ? inst.getValue() : DEFAULT_MAX_HEALTH;
     }
 
     public void syncHunger(Player source, Player target) {

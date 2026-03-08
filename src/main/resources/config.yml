@@ -10,3 +10,12 @@ defaults:
   ender-chest-sync: true
   position-sync: false
 
+# Totem of Undying behaviour
+# When false (default): the player who activates the totem is shielded from
+#   syncing for 2 seconds. Teammates are completely unaffected — only the
+#   totem holder benefits from it.
+# When true: the 2-second sync shield is skipped, so the totem's recovery
+#   effects (regen, absorption, fire resistance) propagate to all teammates
+#   as normal health/effect sync events.
+sync-totem-effects: false
+

@@ -2,7 +2,9 @@ package com.aspectxlol.listener;
 
 import com.aspectxlol.Synced;
 import com.aspectxlol.manager.SyncManager;
-import com.aspectxlol.manager.TeamManager;import com.aspectxlol.model.SyncTeam;
+import com.aspectxlol.manager.TablistManager;
+import com.aspectxlol.manager.TeamManager;
+import com.aspectxlol.model.SyncTeam;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -11,8 +13,10 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityPotionEffectEvent;
 import org.bukkit.event.entity.EntityRegainHealthEvent;
+import org.bukkit.event.entity.EntityResurrectEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
@@ -23,8 +27,12 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
-import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.player.PlayerItemConsumeEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 public class SyncListener implements Listener {
@@ -32,11 +40,21 @@ public class SyncListener implements Listener {
     private final Synced plugin;
     private final TeamManager teamManager;
     private final SyncManager syncManager;
+    private final TablistManager tablistManager;
 
-    public SyncListener(Synced plugin, TeamManager teamManager, SyncManager syncManager) {
+    /**
+     * Players who already have a 1-tick inventory sync scheduled this tick.
+     * Prevents scheduling the same sync multiple times when several inventory
+     * events fire in rapid succession (e.g. shift-clicking stacks).
+     */
+    private final Set<UUID> pendingInventorySync = new HashSet<>();
+
+    public SyncListener(Synced plugin, TeamManager teamManager, SyncManager syncManager,
+                        TablistManager tablistManager) {
         this.plugin = plugin;
         this.teamManager = teamManager;
         this.syncManager = syncManager;
+        this.tablistManager = tablistManager;
     }
 
     // ─── Convenience: broadcast to all online teammates ──────────────────────────
@@ -64,6 +82,9 @@ public class SyncListener implements Listener {
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player joining = event.getPlayer();
         UUID joinId = joining.getUniqueId();
+
+        // Apply scoreboard so this player sees team colours (and others see theirs)
+        tablistManager.onJoin(joining);
 
         SyncTeam team = teamManager.getTeamOf(joinId);
         if (team == null) return;
@@ -97,7 +118,7 @@ public class SyncListener implements Listener {
         Player quitting = event.getPlayer();
         UUID quitId = quitting.getUniqueId();
 
-        // Clean up dead-player guard in case they disconnected while dead
+        tablistManager.onQuit(quitting);
         SyncManager.getDeadPlayers().remove(quitId);
 
         SyncTeam team = teamManager.getTeamOf(quitId);
@@ -123,6 +144,30 @@ public class SyncListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerDeath(PlayerDeathEvent event) {
         SyncManager.getDeadPlayers().add(event.getEntity().getUniqueId());
+    }
+
+    /**
+     * Totem of Undying guard.
+     *
+     * When {@code sync-totem-effects} is false (default): the totem holder is
+     * added to {@code currentlySyncing} for 40 ticks (2 s). This covers the
+     * full burst of regeneration/absorption/fire-resistance effects that Minecraft
+     * applies in the ticks immediately after resurrection, so none of them
+     * propagate to teammates. Only the holder benefits from their own totem.
+     *
+     * When {@code sync-totem-effects} is true: the guard is skipped entirely and
+     * the recovery effects sync to teammates as normal health/effect events.
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onTotemUse(EntityResurrectEvent event) {
+        if (!(event.getEntity() instanceof Player player)) return;
+        if (plugin.getConfig().getBoolean("sync-totem-effects", false)) return;
+
+        UUID uuid = player.getUniqueId();
+        SyncManager.getCurrentlySyncing().add(uuid);
+        // Remove after 2 seconds — long enough to cover the entire totem effect burst
+        Bukkit.getScheduler().runTaskLater(plugin, () ->
+                SyncManager.getCurrentlySyncing().remove(uuid), 40L);
     }
 
     /**
@@ -155,7 +200,33 @@ public class SyncListener implements Listener {
                 syncManager.syncAll(syncSource, respawned, team.getSettings()), 1L);
     }
 
-    // ─── Edge case 1 + 4: Inventory Sync (close / drop / pickup only) ───────────
+    // ─── Inventory Sync ──────────────────────────────────────────────────────────
+    //
+    // We want every inventory change to propagate immediately. The events below
+    // cover every way a player's inventory can change:
+    //
+    //   InventoryCloseEvent      – closed any inventory (crafting table, chest, etc.)
+    //   InventoryClickEvent      – clicked inside any open inventory (external or own)
+    //   PlayerDropItemEvent      – threw an item (Q)
+    //   EntityPickupItemEvent    – picked up a ground item
+    //   PlayerSwapHandItemsEvent – pressed F (main ↔ offhand)
+    //   PlayerItemConsumeEvent   – finished eating/drinking (item removed from hand)
+    //
+    // All handlers call scheduleInventorySync() which uses a 1-tick delay so the
+    // inventory state has settled, and a per-player pendingInventorySync set so
+    // multiple events in the same tick collapse into a single broadcast.
+
+    private void scheduleInventorySync(Player player, SyncTeam team) {
+        UUID uuid = player.getUniqueId();
+        if (pendingInventorySync.contains(uuid)) return; // already queued this tick
+        pendingInventorySync.add(uuid);
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            pendingInventorySync.remove(uuid);
+            if (!player.isOnline()) return;
+            if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
+            broadcastSync(player, team, target -> syncManager.syncInventory(player, target));
+        }, 1L);
+    }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClose(InventoryCloseEvent event) {
@@ -168,6 +239,7 @@ public class SyncListener implements Listener {
 
         InventoryType type = event.getInventory().getType();
 
+        // Ender chest close — sync ender chest contents
         if (type == InventoryType.ENDER_CHEST) {
             if (!team.getSettings().isEnderChestSync()) return;
             broadcastSync(player, team, target -> syncManager.syncEnderChest(player, target));
@@ -175,15 +247,28 @@ public class SyncListener implements Listener {
         }
 
         if (!team.getSettings().isInventorySync()) return;
-        if (type == InventoryType.PLAYER || type == InventoryType.CRAFTING) {
-            broadcastSync(player, team, target -> syncManager.syncInventory(player, target));
-        }
+        scheduleInventorySync(player, team);
     }
 
-    /**
-     * Edge case 4: Drop item → 1-tick delayed inventory sync so the item is
-     * already out of the inventory when we read its contents.
-     */
+    /** Catches every click inside any open inventory — crafting table, chest, own inventory, etc. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        UUID uuid = player.getUniqueId();
+        if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
+
+        // Skip the Synced config GUI itself — GuiClickListener handles that
+        String title = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+                .plainText().serialize(event.getView().title());
+        if (title.equals(com.aspectxlol.gui.ConfigGui.GUI_TITLE)) return;
+
+        SyncTeam team = teamManager.getTeamOf(uuid);
+        if (team == null || !team.getSettings().isInventorySync()) return;
+
+        scheduleInventorySync(player, team);
+    }
+
+    /** Q — item thrown out of inventory. */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
@@ -193,17 +278,10 @@ public class SyncListener implements Listener {
         SyncTeam team = teamManager.getTeamOf(uuid);
         if (team == null || !team.getSettings().isInventorySync()) return;
 
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            if (!player.isOnline()) return;
-            if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
-            broadcastSync(player, team, target -> syncManager.syncInventory(player, target));
-        }, 1L);
+        scheduleInventorySync(player, team);
     }
 
-    /**
-     * Edge case 4: Pickup item → 1-tick delayed inventory sync so the item is
-     * already in the inventory when we read its contents.
-     */
+    /** Ground item walked over / magnet-picked up. */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onEntityPickupItem(EntityPickupItemEvent event) {
         if (!(event.getEntity() instanceof Player player)) return;
@@ -213,11 +291,33 @@ public class SyncListener implements Listener {
         SyncTeam team = teamManager.getTeamOf(uuid);
         if (team == null || !team.getSettings().isInventorySync()) return;
 
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            if (!player.isOnline()) return;
-            if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
-            broadcastSync(player, team, target -> syncManager.syncInventory(player, target));
-        }, 1L);
+        scheduleInventorySync(player, team);
+    }
+
+    /** F key — swaps main hand and off-hand. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerSwapHandItems(PlayerSwapHandItemsEvent event) {
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+        if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
+
+        SyncTeam team = teamManager.getTeamOf(uuid);
+        if (team == null || !team.getSettings().isInventorySync()) return;
+
+        scheduleInventorySync(player, team);
+    }
+
+    /** Finished eating/drinking — item removed from hand slot. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onPlayerItemConsume(PlayerItemConsumeEvent event) {
+        Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
+        if (SyncManager.getCurrentlySyncing().contains(uuid)) return;
+
+        SyncTeam team = teamManager.getTeamOf(uuid);
+        if (team == null || !team.getSettings().isInventorySync()) return;
+
+        scheduleInventorySync(player, team);
     }
 
     // ─── Health Sync ─────────────────────────────────────────────────────────────
@@ -258,9 +358,11 @@ public class SyncListener implements Listener {
         SyncTeam team = teamManager.getTeamOf(uuid);
         if (team == null || !team.getSettings().isHealthSync()) return;
 
+        // Calculate the health the source will have after this hit (clamped to 0).
+        // We DO propagate fatal blows — if one teammate dies, all teammates die.
+        // The deadPlayers guard in onPlayerDeath prevents the resulting setHealth(0)
+        // calls on teammates from looping back and re-killing the original player.
         double newHealth = Math.max(0.0, player.getHealth() - event.getFinalDamage());
-        // Do not propagate a killing blow — that would kill teammates
-        if (newHealth <= 0) return;
 
         SyncManager.withSyncLock(uuid, team, () -> {
             for (UUID memberId : team.getMembers()) {
@@ -269,9 +371,8 @@ public class SyncListener implements Listener {
                 Player target = Bukkit.getPlayer(memberId);
                 if (target == null || !target.isOnline()) continue;
                 double maxHp = SyncManager.getMaxHealth(target);
-                // Ensure we never drive a teammate to 0 via sync
-                double safeHealth = Math.max(0.5, Math.min(newHealth, maxHp));
-                target.setHealth(safeHealth);
+                // Clamp to target's own max health, but allow 0 (death)
+                target.setHealth(Math.min(newHealth, maxHp));
             }
         });
     }
