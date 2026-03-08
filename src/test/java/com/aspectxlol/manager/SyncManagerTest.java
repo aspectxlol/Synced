@@ -2,14 +2,19 @@ package com.aspectxlol.manager;
 
 import com.aspectxlol.model.SyncSettings;
 import com.aspectxlol.model.SyncTeam;
+import org.bukkit.Bukkit;
+import org.bukkit.entity.Player;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 
 @DisplayName("SyncManager — static guard sets")
 class SyncManagerTest {
@@ -111,13 +116,15 @@ class SyncManagerTest {
         SyncTeam team = new SyncTeam(UUID.randomUUID(), source,
                 new SyncSettings(true, true, true, true, true, true, false));
         team.addMember(offlineMember, "Offline");
-        // Bukkit.getPlayer(offlineMember) returns null in a unit-test context,
-        // so offlineMember should NOT be added to the lock set.
 
-        SyncManager.withSyncLock(source, team, () -> {
-            // offlineMember should not appear — Bukkit.getPlayer returns null
-            assertFalse(SyncManager.getCurrentlySyncing().contains(offlineMember));
-        });
+        try (MockedStatic<Bukkit> mockedBukkit = Mockito.mockStatic(Bukkit.class)) {
+            mockedBukkit.when(() -> Bukkit.getPlayer(any(UUID.class))).thenReturn(null);
+
+            SyncManager.withSyncLock(source, team, () -> {
+                // offlineMember should not appear — Bukkit.getPlayer returns null
+                assertFalse(SyncManager.getCurrentlySyncing().contains(offlineMember));
+            });
+        }
     }
 
     // ─── DEFAULT_MAX_HEALTH fallback ─────────────────────────────────────────────
